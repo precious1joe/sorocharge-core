@@ -1,7 +1,7 @@
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use stellar_xdr::{
-    AccountId, PublicKey, ScAddress, ScSymbol, ScVal, SorobanAuthorizedFunction,
-    SorobanAuthorizedInvocation, SorobanCredentials, Uint256,
+    AccountId, PublicKey, ScAddress, ScVal, SorobanAuthorizedFunction, SorobanAuthorizedInvocation,
+    SorobanCredentials, Uint256,
 };
 
 use crate::entry::{Address, ChargeParams};
@@ -28,11 +28,12 @@ fn extract_transfer_args(
     let SorobanAuthorizedFunction::ContractFn(invoke) = &invocation.function else {
         return Err(SorochargeError::UnexpectedInvocationShape);
     };
-    let expected_name: ScSymbol = "transfer"
-        .try_into()
-        .map(ScSymbol)
-        .map_err(|_| SorochargeError::UnexpectedInvocationShape)?;
-    if invoke.function_name != expected_name {
+    // Compared as raw bytes rather than by building an `ScSymbol` from the
+    // literal: that conversion is fallible, and its only possible failure
+    // would be a bug in this crate, not a property of the entry, so it must
+    // not be reported as `UnexpectedInvocationShape`. Comparing bytes keeps
+    // every return of that variant tied to the entry's actual shape.
+    if invoke.function_name.0.as_slice() != b"transfer" {
         return Err(SorochargeError::UnexpectedInvocationShape);
     }
     let [ScVal::Address(from), ScVal::Address(to), ScVal::I128(amount_parts)] =
@@ -844,6 +845,92 @@ mod tests {
             root_invocation,
         });
 
+        let result = verify_entry(
+            &tampered,
+            &f.expected,
+            f.valid_until_ledger - 1,
+            &f.network_passphrase,
+        );
+        assert_eq!(result, Err(SorochargeError::UnexpectedInvocationShape));
+    }
+
+    /// Re-wraps the legacy fixture with `mutate` applied to its root
+    /// invocation's contract call, then runs `verify_entry` on it. Expiry
+    /// is left valid, so the shape check is the first thing that can fail.
+    fn verify_with_mutated_contract_fn(
+        mutate: impl FnOnce(&mut stellar_xdr::InvokeContractArgs),
+    ) -> Result<(), SorochargeError> {
+        let f = load("legacy_transfer_signed");
+        let xdr_entry = f.signed.as_xdr().clone();
+        let mut root_invocation = xdr_entry.root_invocation.clone();
+        let SorobanAuthorizedFunction::ContractFn(invoke) = &mut root_invocation.function else {
+            panic!("fixture root invocation should be a contract call");
+        };
+        mutate(invoke);
+        let tampered = SignedEntry(SorobanAuthorizationEntry {
+            credentials: xdr_entry.credentials,
+            root_invocation,
+        });
+        verify_entry(
+            &tampered,
+            &f.expected,
+            f.valid_until_ledger - 1,
+            &f.network_passphrase,
+        )
+    }
+
+    #[test]
+    fn rejects_a_function_other_than_transfer() {
+        let result = verify_with_mutated_contract_fn(|invoke| {
+            invoke.function_name = stellar_xdr::ScSymbol("approve".try_into().unwrap());
+        });
+        assert_eq!(result, Err(SorochargeError::UnexpectedInvocationShape));
+    }
+
+    #[test]
+    fn rejects_a_function_name_that_only_prefixes_transfer() {
+        let result = verify_with_mutated_contract_fn(|invoke| {
+            invoke.function_name = stellar_xdr::ScSymbol("transfer_from".try_into().unwrap());
+        });
+        assert_eq!(result, Err(SorochargeError::UnexpectedInvocationShape));
+    }
+
+    #[test]
+    fn rejects_transfer_with_the_wrong_argument_count() {
+        let result = verify_with_mutated_contract_fn(|invoke| {
+            let mut args = invoke.args.to_vec();
+            args.pop();
+            invoke.args = args.try_into().unwrap();
+        });
+        assert_eq!(result, Err(SorochargeError::UnexpectedInvocationShape));
+    }
+
+    #[test]
+    fn rejects_transfer_with_a_wrongly_typed_amount_argument() {
+        let result = verify_with_mutated_contract_fn(|invoke| {
+            let mut args = invoke.args.to_vec();
+            args[2] = ScVal::U64(1);
+            invoke.args = args.try_into().unwrap();
+        });
+        assert_eq!(result, Err(SorochargeError::UnexpectedInvocationShape));
+    }
+
+    #[test]
+    fn rejects_a_root_invocation_that_is_not_a_contract_call() {
+        let f = load("legacy_transfer_signed");
+        let xdr_entry = f.signed.as_xdr().clone();
+        let mut root_invocation = xdr_entry.root_invocation.clone();
+        root_invocation.function =
+            SorobanAuthorizedFunction::CreateContractHostFn(stellar_xdr::CreateContractArgs {
+                contract_id_preimage: stellar_xdr::ContractIdPreimage::Asset(
+                    stellar_xdr::Asset::Native,
+                ),
+                executable: stellar_xdr::ContractExecutable::StellarAsset,
+            });
+        let tampered = SignedEntry(SorobanAuthorizationEntry {
+            credentials: xdr_entry.credentials,
+            root_invocation,
+        });
         let result = verify_entry(
             &tampered,
             &f.expected,
