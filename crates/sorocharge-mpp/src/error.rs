@@ -9,18 +9,32 @@ use sorocharge_signer::SorochargeError;
 #[non_exhaustive]
 pub enum MppError {
     /// The underlying HTTP request itself failed.
+    ///
+    /// Audited across `client.rs`; returned when HTTP transport requests or retries fail.
+    /// No mismatch found.
     HttpRequestFailed {
         reason: String,
     },
     /// The resource responded with neither `402` nor `200`.
+    ///
+    /// Audited across `client.rs`; every call site strictly checks
+    /// whether the response status is neither 402 nor 200 before returning
+    /// this variant. No mismatch found.
     UnexpectedStatus {
         status: u16,
     },
     /// A `402` response carried no `WWW-Authenticate: Payment` challenge.
+    ///
+    /// Audited across `client.rs`; returned when an HTTP `402 Payment Required`
+    /// response does not contain any `WWW-Authenticate` header starting with `Payment`.
     MissingChallenge,
-    /// The `WWW-Authenticate` header's `Payment` auth-params did not parse,
-    /// or omitted a required parameter (`id`, `realm`, `method`, `intent`,
-    /// `request`).
+    /// The \`WWW-Authenticate\` header's \`Payment\` auth-params did not parse,
+    /// or omitted a required parameter (\`id\`, \`realm\`, \`method\`, \`intent\",
+    /// \`request\`).
+    ///
+    /// Audited across \`header.rs\` and \`client.rs\`; every call site strictly checks
+    /// whether the challenge auth-params are malformed or missing required keys.
+    /// No mismatch found.
     InvalidChallenge {
         reason: String,
     },
